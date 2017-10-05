@@ -98,22 +98,22 @@ class COGP(Model):
             self.q_sqrt_shared = ParamList(q_sqrt_shared)
             self.q_sqrt_tasks = ParamList(q_sqrt_tasks)
 
-#################################TO BE WORKED ON#####################################################
-#####################################################################################################
-
     def build_prior_KL(self):
         if self.whiten:
-            if self.q_diag:
-                KL = kullback_leiblers.gauss_kl_white_diag(self.q_mu, self.q_sqrt)
-            else:
-                KL = kullback_leiblers.gauss_kl_white(self.q_mu, self.q_sqrt)
+            gauss_kl_white = lambda x: kullback_leiblers.gauss_kl(x[0], x[1])
+            KL_shared = tf.map_fn(gauss_kl_white, (self.q_mu_shared, self.q_sqrt_shared), dtype=float_type)
+            KL_tasks = tf.map_fn(gauss_kl_white, (self.q_mu_tasks, self.q_sqrt_tasks), dtype=float_type)
         else:
-            K = self.kern.K(self.Z) + tf.eye(self.num_inducing, dtype=float_type) * settings.numerics.jitter_level
-            if self.q_diag:
-                KL = kullback_leiblers.gauss_kl_diag(self.q_mu, self.q_sqrt, K)
-            else:
-                KL = kullback_leiblers.gauss_kl(self.q_mu, self.q_sqrt, K)
-        return KL
+            K = lambda x: x.K(self.Z) + tf.eye(self.num_inducing, dtype=float_type) * settings.numerics.jitter_level
+            K_shared = tf.map_fn(K, self.kerns_shared, dtype=float_type)
+            K_tasks = tf.map_fn(K, self.kerns_tasks, dtype=float_type)
+
+            KL_shared = tf.map_fn(gauss_kl_white, (self.q_mu_shared, self.q_sqrt_shared, K_shared), dtype=float_type)
+            KL_tasks = tf.map_fn(gauss_kl_white, (self.q_mu_tasks, self.q_sqrt_tasks, K_tasks), dtype=float_type)
+        return tf.reduce_sum(KL_shared) + tf_reduce_sum(KL_tasks)
+
+#################################TO BE WORKED ON#####################################################
+#####################################################################################################
 
     def build_likelihood(self):
         """
