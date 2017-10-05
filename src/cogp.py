@@ -1,12 +1,12 @@
 from __future__ import absolute_import
 import tensorflow as tf
 import numpy as np
-from .param import Param, ParamList
-from .model import Model
-from . import transforms, conditionals, kullback_leiblers
-from .mean_functions import Zero
-from ._settings import settings
-from .minibatch import MinibatchData
+from gpflow.param import Param, ParamList
+from gpflow.model import Model
+from gpflow import transforms, conditionals, kullback_leiblers
+from gpflow.mean_functions import Zero
+from gpflow._settings import settings
+from gpflow.minibatch import MinibatchData
 float_type = settings.dtypes.float_type
 
 
@@ -157,4 +157,58 @@ class COGP(Model):
             tf.cast(tf.shape(self.X)[0], settings.dtypes.float_type)
 
         return tf.reduce_sum(var_exp) * scale - KL
+
+#################################COPY=PASTE JOB~#####################################################
+#####################################################################################################
+
+    @AutoFlow((float_type, [None, None]))
+    def predict_f(self, Xnew):
+        """
+        Compute the mean and variance of the latent function(s)
+        at the points `Xnew`.
+        """
+        return self.build_predict(Xnew)
+
+    @AutoFlow((float_type, [None, None]))
+    def predict_f_full_cov(self, Xnew):
+        """
+        Compute the mean and covariance matrix of the latent function(s) at the
+        points Xnew.
+        """
+        return self.build_predict(Xnew, full_cov=True)
+
+    @AutoFlow((float_type, [None, None]), (tf.int32, []))
+    def predict_f_samples(self, Xnew, num_samples):
+        """
+        Produce samples from the posterior latent function(s) at the points
+        Xnew.
+        """
+        mu, var = self.build_predict(Xnew, full_cov=True)
+        jitter = tf.eye(tf.shape(mu)[0], dtype=float_type) * settings.numerics.jitter_level
+        samples = []
+        for i in range(self.num_latent):
+            L = tf.cholesky(var[:, :, i] + jitter)
+            shape = tf.stack([tf.shape(L)[0], num_samples])
+            V = tf.random_normal(shape, dtype=settings.dtypes.float_type)
+            samples.append(mu[:, i:i + 1] + tf.matmul(L, V))
+        return tf.transpose(tf.stack(samples))
+
+    @AutoFlow((float_type, [None, None]))
+    def predict_y(self, Xnew):
+        """
+        Compute the mean and variance of held-out data at the points Xnew
+        """
+        pred_f_mean, pred_f_var = self.build_predict(Xnew)
+        return self.likelihood.predict_mean_and_var(pred_f_mean, pred_f_var)
+
+    @AutoFlow((float_type, [None, None]), (float_type, [None, None]))
+    def predict_density(self, Xnew, Ynew):
+        """
+        Compute the (log) density of the data Ynew at the points Xnew
+        Note that this computes the log density of the data individually,
+        ignoring correlations between them. The result is a matrix the same
+        shape as Ynew containing the log densities.
+        """
+        pred_f_mean, pred_f_var = self.build_predict(Xnew)
+        return self.likelihood.predict_density(pred_f_mean, pred_f_var, Ynew)
 
