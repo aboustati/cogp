@@ -16,7 +16,7 @@
 from __future__ import absolute_import
 import tensorflow as tf
 import numpy as np
-from .param import Param
+from .param import Param, ParamList
 from .model import Model
 from . import transforms, conditionals, kullback_leiblers
 from .mean_functions import Zero
@@ -81,19 +81,37 @@ class COGP(Model):
         self.q_diag, self.whiten = q_diag, whiten
         self.num_shared = num_shared
         self.num_tasks = num_tasks
-        self.Z = Param(Z)
-        self.num_latent = num_latent or Y.shape[1]
+        self.Z_shared = ParamList([Param(Z.copy()) for _ in range(self.num_shared)])
+        self.Z_tasks = ParamList([Param(Z.copy()) for _ in range(self.num_tasks)])
+        self.num_latent = num_latent or Y.shape[1]-1
         self.num_inducing = Z.shape[0]
 
         # init variational parameters
-        self.q_mu = Param(np.zeros((self.num_inducing, self.num_latent)))
+        # One parameter set for each shared and task specific processes
+        q_mu = np.zeros((self.num_inducing, self.num_latent))
+        q_mu_shared = [Param(q_mu.copy()) for _ in range(self.num_shared)]
+        q_mu_tasks = [Param(q_mu.copy()) for _ in range(self.num_tasks)]
+        self.q_mu_shared = ParamList(q_mu_shared)
+        self.q_mu_tasks = ParamList(q_mu_tasks)
         if self.q_diag:
-            self.q_sqrt = Param(np.ones((self.num_inducing, self.num_latent)),
-                                transforms.positive)
+            q_sqrt = np.ones((self.num_inducing, self.num_latent))
+            q_sqrt_shared = [Param(q_sqrt.copy(), transforms.positive) for _ in
+                             range(self.num_shared)]
+            q_sqrt_tasks = [Param(q_sqrt.copy(), transforms.positive) for _ in
+                             range(self.num_tasks)]
+            self.q_sqrt_shared = ParamList(q_sqrt_shared)
+            self.q_sqrt_tasks = ParamList(q_sqrt_tasks)
         else:
             q_sqrt = np.array([np.eye(self.num_inducing)
                                for _ in range(self.num_latent)]).swapaxes(0, 2)
-            self.q_sqrt = Param(q_sqrt, transforms.LowerTriangular(self.num_inducing, self.num_latent))
+            q_sqrt_shared = [Param(q_sqrt.copy(),
+                                   transforms.LowerTriangular(self.num_inducing, self.num_latent))
+                             for _ in range(self.num_shared)]
+            q_sqrt_tasks = [Param(q_sqrt.copy(),
+                                   transforms.LowerTriangular(self.num_inducing, self.num_latent))
+                             for _ in range(self.num_tasks)]
+            self.q_sqrt_shared = ParamList(q_sqrt_shared)
+            self.q_sqrt_tasks = ParamList(q_sqrt_tasks)
 
     def build_prior_KL(self):
         if self.whiten:
