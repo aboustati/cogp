@@ -112,6 +112,29 @@ class COGP(Model):
             KL_tasks = tf.map_fn(gauss_kl_white, (self.q_mu_tasks, self.q_sqrt_tasks, K_tasks), dtype=float_type)
         return tf.reduce_sum(KL_shared) + tf_reduce_sum(KL_tasks)
 
+    def latent_conditionals(self, Xnew, full_cov=False):
+        def f_conditional(x):
+            mean, variance = conditionals.conditional(Xnew, x[0], x[1], x[2],
+                                               q_sqrt=x[3], full_cov=full_con,
+                                               whiten=self.whiten)
+            return mean + self.mean_function(Xnew), variance
+
+        mu_shared, var_shared = tf.map_fn(f_conditional, (self.Z_shared,
+                                                          self.kern_shared,
+                                                          self.q_mu_shared,
+                                                          self.q_sqrt_shared),
+                                          dtype=float_type)
+        mu_tasks, var_tasks = tf.map_fn(f_conditional, (self.Z_tasks,
+                                                          self.kern_tasks,
+                                                          self.q_mu_tasks,
+                                                          self.q_sqrt_tasks),
+                                          dtype=float_type)
+        return (mu_shared, var_shared), (mu_tasks, var_tasks)
+
+    def build_predict(self, Xnew, full_cov=False):
+        (mu_shared, var_shared), (mu_tasks, var_tasks) = self.latent_conditionals(Xnew, full_cov)
+        return tf.reduce_sum(mu_shared) + tf.reduce_sum(mu_tasks), tf.reduce_sum(var_shared) + tf.reduce_sum(var_tasks)
+
 #################################TO BE WORKED ON#####################################################
 #####################################################################################################
 
@@ -135,7 +158,3 @@ class COGP(Model):
 
         return tf.reduce_sum(var_exp) * scale - KL
 
-    def build_predict(self, Xnew, full_cov=False):
-        mu, var = conditionals.conditional(Xnew, self.Z, self.kern, self.q_mu,
-                                           q_sqrt=self.q_sqrt, full_cov=full_cov, whiten=self.whiten)
-        return mu + self.mean_function(Xnew), var
