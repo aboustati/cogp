@@ -98,6 +98,9 @@ class COGP(Model):
             self.q_sqrt_shared = ParamList(q_sqrt_shared)
             self.q_sqrt_tasks = ParamList(q_sqrt_tasks)
 
+#################################TO BE WORKED ON#####################################################
+#####################################################################################################
+
     def build_prior_KL(self):
         if self.whiten:
             if self.q_diag:
