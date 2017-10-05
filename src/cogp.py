@@ -1,7 +1,7 @@
 from __future__ import absolute_import
 import tensorflow as tf
 import numpy as np
-from gpflow.param import Param, ParamList
+from gpflow.param import Param, ParamList, AutoFlow
 from gpflow.model import Model
 from gpflow import transforms, conditionals, kullback_leiblers
 from gpflow.mean_functions import Zero
@@ -43,6 +43,11 @@ class COGP(Model):
         - whiten is a boolean. If True, we use the whitened representation of
           the inducing points.
         """
+
+        num_shared = len(kerns_shared)
+        num_tasks = len(kerns_tasks)
+
+        assert np.unique(X[:,-1]).shape[0] == num_tasks
         # sort out the X, Y into MiniBatch objects.
         if minibatch_size is None:
             minibatch_size = X.shape[0]
@@ -50,17 +55,12 @@ class COGP(Model):
         X = MinibatchData(X, minibatch_size, np.random.RandomState(0))
         Y = MinibatchData(Y, minibatch_size, np.random.RandomState(0))
 
-        num_shared = len(kerns_shared)
-        num_tasks = len(kerns_tasks)
-
-        assert np.unique(X[:,-1]).shape[0] == num_tasks
-
         # init the super class, accept args
         Model.__init__(self)
         self.X = X
         self.Y = Y
-        self.kerns_shared = kerns.shared
-        self.kerns_specific = kerns.specific
+        self.kerns_shared = kerns_shared
+        self.kerns_tasks = kerns_tasks
         self.likelihood = likelihood
         self.mean_function = mean_function or Zero()
         self.q_diag, self.whiten = q_diag, whiten
@@ -101,8 +101,9 @@ class COGP(Model):
     def build_prior_KL(self):
         if self.whiten:
             gauss_kl_white = lambda x: kullback_leiblers.gauss_kl(x[0], x[1])
-            KL_shared = tf.map_fn(gauss_kl_white, (self.q_mu_shared, self.q_sqrt_shared), dtype=float_type)
-            KL_tasks = tf.map_fn(gauss_kl_white, (self.q_mu_tasks, self.q_sqrt_tasks), dtype=float_type)
+            KL_shared = map(gauss_kl_white, (self.q_mu_shared, self.q_sqrt_shared))
+            #KL_shared = tf.map_fn(gauss_kl_white, (self.q_mu_shared, self.q_sqrt_shared), dtype=float_type)
+            #KL_tasks = tf.map_fn(gauss_kl_white, (self.q_mu_tasks, self.q_sqrt_tasks), dtype=float_type)
         else:
             K = lambda x: x.K(self.Z) + tf.eye(self.num_inducing, dtype=float_type) * settings.numerics.jitter_level
             K_shared = tf.map_fn(K, self.kerns_shared, dtype=float_type)
