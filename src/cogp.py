@@ -1,14 +1,15 @@
 from __future__ import absolute_import
+import warnings
 import tensorflow as tf
 import numpy as np
 from gpflow.param import Param, ParamList, AutoFlow
 from gpflow.model import Model
+from gpflow.kernels import Coregion, Add
 from gpflow import transforms, conditionals, kullback_leiblers
 from gpflow.mean_functions import Zero
 from gpflow._settings import settings
 from gpflow.minibatch import MinibatchData
 float_type = settings.dtypes.float_type
-
 
 class COGP(Model):
     """
@@ -29,8 +30,8 @@ class COGP(Model):
     def __init__(self, X, Y, kerns_shared, kerns_tasks, likelihood, Z, mean_function=None,
                  num_latent=None, q_diag=False, whiten=True, minibatch_size=None):
         """
-        - X is a data matrix, size N x D
-        - Y is a data matrix, size N x R
+        - X is a data matrix augmented with task index column, size N x D
+        - Y is a data matrix augmented with task index column, size N x R
         - kerns_joint is a list of kernels for the shared processes, length >=1
         - kerns_tasks is a list of kernels for the each specific task,
           length = number of tasks
@@ -46,8 +47,19 @@ class COGP(Model):
 
         num_shared = len(kerns_shared)
         num_tasks = len(kerns_tasks)
+        task_index_col = X.shape[1]-1
 
-        assert np.unique(X[:,-1]).shape[0] == num_tasks
+        assert Y.shape[1]>1, "Y must have a task index column"
+        assert np.all(X[:,-1]==Y[:,-1]), "Task indices in inputs and outputs doesn't match"
+        assert X.shape[1:]==Z.shape[1:], "X and Z must have the same number of features"
+        assert np.unique(X[:,-1]).shape[0] == num_tasks, "Task indices and number of tasks do not match"
+
+        for k in kerns_shared:
+            if isinstance(k.active_dims, slice) or len(k.active_dims)>=X.shape[1]:
+                warnings.warn("One of the shared kernels is acting on all dimensions including the task index!")
+        for k in kerns_tasks:
+            if isinstance(k.active_dims, slice) or len(k.active_dims)>=X.shape[1]:
+                warnings.warn("One of the tasks kernels is acting on all dimensions including the task index!")
         # sort out the X, Y into MiniBatch objects.
         if minibatch_size is None:
             minibatch_size = X.shape[0]
@@ -59,17 +71,35 @@ class COGP(Model):
         Model.__init__(self)
         self.X = X
         self.Y = Y
-        self.kerns_shared = kerns_shared
-        self.kerns_tasks = kerns_tasks
+        self.kerns_shared = ParamList(kerns_shared)
+        #self.kerns_tasks = ParamList(kerns_tasks)
         self.likelihood = likelihood
         self.mean_function = mean_function or Zero()
         self.q_diag, self.whiten = q_diag, whiten
         self.num_shared = num_shared
         self.num_tasks = num_tasks
         self.Z_shared = ParamList([Param(Z.copy()) for _ in range(self.num_shared)])
-        self.Z_tasks = ParamList([Param(Z.copy()) for _ in range(self.num_tasks)])
+        #self.Z_tasks = ParamList([Param(Z.copy()) for _ in range(self.num_tasks)])
         self.num_latent = num_latent or Y.shape[1]-1
         self.num_inducing = Z.shape[0]
+
+        task_selector = np.eye(self.num_tasks)
+        kern_list = []
+        Z_tasks = []
+        for i in range(self.num_tasks):
+            coreg = Coregion(1, output_dim=self.num_tasks, rank=1,
+                             active_dims=[task_index_col])
+            coreg.kappa = task_selector[i]
+            coreg.kappa.fixed = True
+            k_i = kerns_tasks[i] * coreg
+            kern_list.append(k_i)
+
+            Z_i = np.hstack([np.delete(Z.copy(), -1, axis=1), i*np.ones((Z.shape[0],1))])
+            Z_tasks.append(Z_i)
+
+        self.kerns_shared = Add(kern_list)
+        self.Z_tasks = Param(np.vstack(Z_tasks))
+
 
         # init variational parameters
         # One parameter set for each shared and task specific processes
@@ -100,44 +130,60 @@ class COGP(Model):
 
     def build_prior_KL(self):
         if self.whiten:
-            gauss_kl_white = lambda x: kullback_leiblers.gauss_kl(x[0], x[1])
-            KL_shared = map(gauss_kl_white, (self.q_mu_shared, self.q_sqrt_shared))
-            #KL_shared = tf.map_fn(gauss_kl_white, (self.q_mu_shared, self.q_sqrt_shared), dtype=float_type)
-            #KL_tasks = tf.map_fn(gauss_kl_white, (self.q_mu_tasks, self.q_sqrt_tasks), dtype=float_type)
+            K = lambda x: None
         else:
             K = lambda x: x.K(self.Z) + tf.eye(self.num_inducing, dtype=float_type) * settings.numerics.jitter_level
-            K_shared = tf.map_fn(K, self.kerns_shared, dtype=float_type)
-            K_tasks = tf.map_fn(K, self.kerns_tasks, dtype=float_type)
 
-            KL_shared = tf.map_fn(gauss_kl_white, (self.q_mu_shared, self.q_sqrt_shared, K_shared), dtype=float_type)
-            KL_tasks = tf.map_fn(gauss_kl_white, (self.q_mu_tasks, self.q_sqrt_tasks, K_tasks), dtype=float_type)
-        return tf.reduce_sum(KL_shared) + tf_reduce_sum(KL_tasks)
+        KL_shared = []
+        for mu, sqrt, kern in zip(self.q_mu_shared, self.q_sqrt_shared, self.kerns_shared):
+            kern_eval = K(kern)
+            KL_shared.append(kullback_leiblers.gauss_kl(mu, sqrt, kern_eval))
+
+        KL_tasks = []
+        for mu, sqrt, kern in zip(self.q_mu_tasks, self.q_sqrt_tasks, self.kerns_tasks):
+            kern_eval = K(kern)
+            KL_tasks.append(kullback_leiblers.gauss_kl(mu, sqrt, kern_eval))
+
+        return tf.add_n(KL_shared) + tf.add_n(KL_tasks)
 
     def latent_conditionals(self, Xnew, full_cov=False):
-        def f_conditional(x):
-            mean, variance = conditionals.conditional(Xnew, x[0], x[1], x[2],
-                                               q_sqrt=x[3], full_cov=full_con,
+        def f_conditional(Z, kern, mu, sqrt):
+            mean, variance = conditionals.conditional(Xnew, Z, kern, mu,
+                                               q_sqrt=sqrt, full_cov=full_cov,
                                                whiten=self.whiten)
             return mean + self.mean_function(Xnew), variance
 
-        mu_shared, var_shared = tf.map_fn(f_conditional, (self.Z_shared,
-                                                          self.kern_shared,
-                                                          self.q_mu_shared,
-                                                          self.q_sqrt_shared),
-                                          dtype=float_type)
-        mu_tasks, var_tasks = tf.map_fn(f_conditional, (self.Z_tasks,
-                                                          self.kern_tasks,
-                                                          self.q_mu_tasks,
-                                                          self.q_sqrt_tasks),
-                                          dtype=float_type)
+        mu_shared = []
+        var_shared = []
+        for Z, kern, mu, sqrt in zip(self.Z_shared,
+                                     self.kerns_shared,
+                                     self.q_mu_shared,
+                                     self.q_sqrt_shared):
+            m, v = f_conditional(Z, kern, mu, sqrt)
+            mu_shared.append(m)
+            var_shared.append(v)
+
+        mu_tasks = []
+        var_tasks = []
+
+        for Z, kern, mu, sqrt in zip(self.Z_tasks,
+                                     self.kerns_tasks,
+                                     self.q_mu_tasks,
+                                     self.q_sqrt_tasks):
+            m, v = f_conditional(Z, kern, mu, sqrt)
+            mu_tasks.append(m)
+            var_tasks.append(v)
+
         return (mu_shared, var_shared), (mu_tasks, var_tasks)
 
     def build_predict(self, Xnew, full_cov=False):
         (mu_shared, var_shared), (mu_tasks, var_tasks) = self.latent_conditionals(Xnew, full_cov)
-        return tf.reduce_sum(mu_shared) + tf.reduce_sum(mu_tasks), tf.reduce_sum(var_shared) + tf.reduce_sum(var_tasks)
+        sum_mu_shared = tf.add_n(mu_shared)
+        sum_mu_tasks = tf.add_n(mu_tasks)
+        sum_var_shared = tf.add_n(var_shared)
+        sum_var_tasks = tf.add_n(var_tasks)
+        return tf.add(sum_mu_shared, sum_mu_tasks), tf.add(sum_var_shared, sum_var_tasks)
 
-#################################TO BE WORKED ON#####################################################
-#####################################################################################################
 
     def build_likelihood(self):
         """
