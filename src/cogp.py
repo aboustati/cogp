@@ -85,7 +85,7 @@ class COGP(Model):
 
         task_selector = np.eye(self.num_tasks)
         kern_list = []
-        Z_tasks = []
+        Z_tasks = Z.copy()
         for i in range(self.num_tasks):
             coreg = Coregion(1, output_dim=self.num_tasks, rank=1,
                              active_dims=[task_index_col])
@@ -94,39 +94,34 @@ class COGP(Model):
             k_i = kerns_tasks[i] * coreg
             kern_list.append(k_i)
 
-            Z_i = np.hstack([np.delete(Z.copy(), -1, axis=1), i*np.ones((Z.shape[0],1))])
-            Z_tasks.append(Z_i)
 
         self.kerns_shared = Add(kern_list)
-        self.Z_tasks = Param(np.vstack(Z_tasks))
+        self.Z_tasks = Param(Z_tasks)
 
 
         # init variational parameters
         # One parameter set for each shared and task specific processes
         q_mu = np.zeros((self.num_inducing, self.num_latent))
         q_mu_shared = [Param(q_mu.copy()) for _ in range(self.num_shared)]
-        q_mu_tasks = [Param(q_mu.copy()) for _ in range(self.num_tasks)]
+        q_mu_tasks = q_mu.copy()
         self.q_mu_shared = ParamList(q_mu_shared)
-        self.q_mu_tasks = ParamList(q_mu_tasks)
+        self.q_mu_tasks = Param(q_mu_tasks)
         if self.q_diag:
             q_sqrt = np.ones((self.num_inducing, self.num_latent))
             q_sqrt_shared = [Param(q_sqrt.copy(), transforms.positive) for _ in
                              range(self.num_shared)]
-            q_sqrt_tasks = [Param(q_sqrt.copy(), transforms.positive) for _ in
-                             range(self.num_tasks)]
+            q_sqrt_tasks = Param(q_sqrt.copy(), transforms.positive)
             self.q_sqrt_shared = ParamList(q_sqrt_shared)
-            self.q_sqrt_tasks = ParamList(q_sqrt_tasks)
+            self.q_sqrt_tasks = q_sqrt_tasks
         else:
             q_sqrt = np.array([np.eye(self.num_inducing)
                                for _ in range(self.num_latent)]).swapaxes(0, 2)
             q_sqrt_shared = [Param(q_sqrt.copy(),
                                    transforms.LowerTriangular(self.num_inducing, self.num_latent))
                              for _ in range(self.num_shared)]
-            q_sqrt_tasks = [Param(q_sqrt.copy(),
-                                   transforms.LowerTriangular(self.num_inducing, self.num_latent))
-                             for _ in range(self.num_tasks)]
+            q_sqrt_tasks = Param(q_sqrt.copy(), transforms.LowerTriangular(self.num_inducing, self.num_latent))
             self.q_sqrt_shared = ParamList(q_sqrt_shared)
-            self.q_sqrt_tasks = ParamList(q_sqrt_tasks)
+            self.q_sqrt_tasks = q_sqrt_tasks
 
     def build_prior_KL(self):
         if self.whiten:
