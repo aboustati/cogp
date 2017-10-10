@@ -72,14 +72,12 @@ class COGP(Model):
         self.X = X
         self.Y = Y
         self.kerns_shared = ParamList(kerns_shared)
-        #self.kerns_tasks = ParamList(kerns_tasks)
         self.likelihood = likelihood
         self.mean_function = mean_function or Zero()
         self.q_diag, self.whiten = q_diag, whiten
         self.num_shared = num_shared
         self.num_tasks = num_tasks
         self.Z_shared = ParamList([Param(Z.copy()) for _ in range(self.num_shared)])
-        #self.Z_tasks = ParamList([Param(Z.copy()) for _ in range(self.num_tasks)])
         self.num_latent = num_latent or Y.shape[1]-1
         self.num_inducing = Z.shape[0]
 
@@ -95,7 +93,7 @@ class COGP(Model):
             kern_list.append(k_i)
 
 
-        self.kerns_shared = Add(kern_list)
+        self.kerns_tasks = Add(kern_list)
         self.Z_tasks = Param(Z_tasks)
 
 
@@ -134,12 +132,11 @@ class COGP(Model):
             kern_eval = K(kern)
             KL_shared.append(kullback_leiblers.gauss_kl(mu, sqrt, kern_eval))
 
-        KL_tasks = []
-        for mu, sqrt, kern in zip(self.q_mu_tasks, self.q_sqrt_tasks, self.kerns_tasks):
-            kern_eval = K(kern)
-            KL_tasks.append(kullback_leiblers.gauss_kl(mu, sqrt, kern_eval))
+        KL_tasks = kullback_leiblers.gauss_kl(self.q_mu_tasks,
+                                              self.q_sqrt_tasks,
+                                              K(self.kerns_tasks))
 
-        return tf.add_n(KL_shared) + tf.add_n(KL_tasks)
+        return tf.add_n(KL_shared) + KL_tasks
 
     def latent_conditionals(self, Xnew, full_cov=False):
         def f_conditional(Z, kern, mu, sqrt):
@@ -158,26 +155,16 @@ class COGP(Model):
             mu_shared.append(m)
             var_shared.append(v)
 
-        mu_tasks = []
-        var_tasks = []
-
-        for Z, kern, mu, sqrt in zip(self.Z_tasks,
-                                     self.kerns_tasks,
-                                     self.q_mu_tasks,
-                                     self.q_sqrt_tasks):
-            m, v = f_conditional(Z, kern, mu, sqrt)
-            mu_tasks.append(m)
-            var_tasks.append(v)
+        mu_tasks, var_tasks = f_conditional(self.Z_tasks, self.kerns_tasks,
+                                            self.q_mu_tasks, self.q_sqrt_tasks)
 
         return (mu_shared, var_shared), (mu_tasks, var_tasks)
 
     def build_predict(self, Xnew, full_cov=False):
         (mu_shared, var_shared), (mu_tasks, var_tasks) = self.latent_conditionals(Xnew, full_cov)
         sum_mu_shared = tf.add_n(mu_shared)
-        sum_mu_tasks = tf.add_n(mu_tasks)
         sum_var_shared = tf.add_n(var_shared)
-        sum_var_tasks = tf.add_n(var_tasks)
-        return tf.add(sum_mu_shared, sum_mu_tasks), tf.add(sum_var_shared, sum_var_tasks)
+        return tf.add(sum_mu_shared, mu_tasks), tf.add(sum_var_shared, var_tasks)
 
 
     def build_likelihood(self):
